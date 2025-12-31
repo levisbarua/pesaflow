@@ -13,15 +13,11 @@ import {
   Smartphone,
   ChevronRight,
   RefreshCw,
-  Info,
   CheckCircle2,
-  AlertTriangle,
-  XCircle,
-  Check,
   ShieldCheck,
-  Server,
   Wifi,
-  WifiOff
+  WifiOff,
+  Loader2
 } from 'lucide-react';
 import { User, Transaction, TransactionType, TransactionStatus, Notification } from '../types';
 import { dbService, authService } from '../services/mockFirebase';
@@ -68,7 +64,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
     fetchNotifications();
     checkBackend();
 
-    // Click outside handler for notifications
     const handleClickOutside = (event: MouseEvent) => {
       if (notificationRef.current && !notificationRef.current.contains(event.target as Node)) {
         setShowNotifications(false);
@@ -88,7 +83,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
     try {
       const data = await dbService.getTransactions(user.uid);
       setTransactions(data);
-      // Also refresh user balance
       const updatedUser = await authService.getCurrentUser();
       if (updatedUser) setUser(updatedUser);
     } catch (error) {
@@ -108,7 +102,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
   };
 
   const handleMarkRead = async (id: string) => {
-    // Optimistic update
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
     await dbService.markNotificationRead(user.uid, id);
   };
@@ -125,64 +118,79 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
     setPaying(true);
     setPaymentStatus('processing');
     setLastTransaction(null);
+    setStatusMessage('');
     
     try {
       const numericAmount = parseFloat(amount);
       if (isNaN(numericAmount) || numericAmount <= 0) throw new Error('Invalid amount');
 
-      let completedTxn: Transaction;
-
       if (paymentMode === 'withdraw') {
-        if (numericAmount > user.balance) throw new Error('Insufficient funds');
         setStatusMessage('Processing withdrawal...');
-        
-        // 1. Simulate Withdrawal
-        const txn = await mpesaService.withdrawToMobile({
+        await mpesaService.withdrawToMobile({
           phoneNumber: phone,
-          amount: numericAmount
+          amount: numericAmount,
+          userId: user.uid
         });
-
-        // 2. Save to DB (dbService handles balance deduction for withdrawals)
-        await dbService.addTransaction(user.uid, txn);
-        completedTxn = txn;
-        setStatusMessage('Withdrawal Successful!');
-
+        setPaymentStatus('success');
+        setAmount('');
+        setPaying(false);
+        refreshData();
       } else {
-        // Deposit Logic
-        setStatusMessage('Initiating STK Push...');
+        // DEPOSIT FLOW
+        if (isConnected) {
+            setStatusMessage('Connecting to Safaricom...');
+        } else {
+            setStatusMessage('Simulating Payment (Demo Mode)...');
+        }
         
-        // 1. Initiate STK Push
+        // 1. Initiate STK Push (Backend creates PENDING txn OR Client creates it in Simulation mode)
         const response = await mpesaService.initiateStkPush({
           phoneNumber: phone,
           amount: numericAmount,
-          accountReference: 'PesaFlow Wallet'
+          accountReference: 'PesaFlow',
+          userId: user.uid
         });
 
-        setStatusMessage('Check your phone to enter PIN...');
+        setStatusMessage(isConnected 
+            ? 'Request sent. Please check your phone to enter PIN.' 
+            : 'Simulating phone entry... Please wait ~5s.'
+        );
         
-        // 2. Poll for status
-        const txn = await mpesaService.checkTransactionStatus(response.CheckoutRequestID);
+        // 2. Listen for Database Update (Real-time)
+        // Whether it's the real backend or our simulation updating Firestore, this listener works the same!
+        const unsubscribe = dbService.listenToTransaction(response.CheckoutRequestID, async (txn) => {
+          if (!txn) return;
+          
+          if (txn.status === TransactionStatus.COMPLETED) {
+            setLastTransaction(txn);
+            setPaymentStatus('success');
+            setAmount('');
+            setPaying(false);
+            refreshData(); // Update balance UI
+            fetchNotifications();
+            unsubscribe(); // Stop listening
+          } else if (txn.status === TransactionStatus.FAILED) {
+            setPaymentStatus('error');
+            setStatusMessage(txn.description || 'Transaction failed on your phone.');
+            setPaying(false);
+            unsubscribe();
+          }
+        });
         
-        if (txn.status === TransactionStatus.COMPLETED) {
-          // 3. Complete and persist to DB
-          await mpesaService.completeTransaction(txn, numericAmount);
-          completedTxn = { ...txn, amount: numericAmount };
-          setStatusMessage('Payment Successful!');
-        } else {
-          throw new Error('Transaction failed or cancelled');
-        }
+        // Safety timeout (if no callback received in 60s)
+        setTimeout(() => {
+          if (paying) { // If still processing
+            unsubscribe();
+            setPaymentStatus('error');
+            setStatusMessage('Transaction timed out. Please check your network or try again.');
+            setPaying(false);
+          }
+        }, 60000);
       }
-
-      setLastTransaction(completedTxn);
-      setPaymentStatus('success');
-      setAmount('');
-      refreshData();
-      fetchNotifications();
 
     } catch (err: any) {
       setPaymentStatus('error');
       setStatusMessage(err.message || 'Transaction failed');
-    } finally {
       setPaying(false);
     }
   };
@@ -206,13 +214,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
 
   return (
     <div className="min-h-screen bg-gray-50 flex">
-      {/* Receipt Modal */}
       <ReceiptModal 
         transaction={selectedTransaction} 
         onClose={() => setSelectedTransaction(null)} 
       />
 
-      {/* Mobile Sidebar Overlay */}
       {mobileMenuOpen && (
         <div className="fixed inset-0 z-40 bg-gray-800 bg-opacity-50 lg:hidden" onClick={() => setMobileMenuOpen(false)}></div>
       )}
@@ -240,29 +246,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
           </div>
 
           <div className="p-4 border-t border-gray-100 space-y-4">
-             {/* System Status Indicator */}
-            <div className={`rounded-lg p-3 flex items-center space-x-3 text-xs border ${
-              isConnected === true ? 'bg-green-50 border-green-200 text-green-700' : 
-              isConnected === false ? 'bg-orange-50 border-orange-200 text-orange-700' : 'bg-gray-50 border-gray-200 text-gray-500'
-            }`}>
+            <div className={`rounded-lg p-3 flex items-center space-x-3 text-xs border ${isConnected ? 'bg-green-50 border-green-200 text-green-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
               <div className="relative">
-                <div className={`w-2 h-2 rounded-full ${
-                  isConnected === true ? 'bg-green-500' : 
-                  isConnected === false ? 'bg-orange-500' : 'bg-gray-400'
-                }`}></div>
+                <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-amber-500'}`}></div>
                 {isConnected && <div className="absolute top-0 left-0 w-2 h-2 rounded-full bg-green-500 animate-ping"></div>}
               </div>
               <div className="flex-1">
-                <p className="font-semibold">
-                  {isConnected === true ? 'System Online' : 
-                   isConnected === false ? 'Demo Mode' : 'Checking...'}
-                </p>
-                <p className="opacity-80">
-                  {isConnected === true ? 'Real M-Pesa Connected' : 
-                   isConnected === false ? 'Simulated Backend' : 'Connecting to Server'}
-                </p>
+                <p className="font-semibold">{isConnected ? 'System Online' : 'Simulation Mode'}</p>
+                <p className="opacity-80">{isConnected ? 'Live M-Pesa Connection' : 'Backend Unreachable'}</p>
               </div>
-              {isConnected === true ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
+              {isConnected ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
             </div>
 
             <div className="flex items-center space-x-3 px-2">
@@ -301,8 +294,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                   <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full border border-white"></span>
                 )}
               </button>
-
-              {/* Notifications Dropdown */}
               {showNotifications && (
                 <div className="absolute right-0 mt-2 w-80 md:w-96 bg-white rounded-xl shadow-xl border border-gray-100 z-50 overflow-hidden ring-1 ring-black ring-opacity-5">
                   <div className="px-4 py-3 border-b border-gray-50 flex justify-between items-center bg-gray-50/50">
@@ -312,7 +303,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                         onClick={handleMarkAllRead} 
                         className="text-xs text-mpesa-600 hover:text-mpesa-700 font-medium hover:underline flex items-center"
                       >
-                        <Check className="w-3 h-3 mr-1" /> Mark all read
+                         Mark all read
                       </button>
                     )}
                   </div>
@@ -337,9 +328,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                                   {notif.title}
                                 </p>
                                 <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{notif.message}</p>
-                                <p className="text-[10px] text-gray-400 mt-1.5">
-                                  {new Date(notif.date).toLocaleDateString()} {new Date(notif.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                                </p>
                               </div>
                             </div>
                           </div>
@@ -401,13 +389,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                     </div>
                   </div>
 
-                  {/* Quick Payment Teaser */}
+                  {/* Teaser */}
                   <div className="bg-white rounded-2xl p-6 border border-gray-200 shadow-sm flex flex-col justify-center">
                      <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mb-4">
                         <Smartphone className="w-6 h-6 text-green-600" />
                      </div>
-                     <h3 className="text-lg font-bold text-gray-900">Lipa na M-Pesa</h3>
-                     <p className="text-gray-500 text-sm mt-1 mb-4">Quickly pay bills or top up your account directly from your phone.</p>
+                     <h3 className="text-lg font-bold text-gray-900">M-Pesa Express</h3>
+                     <p className="text-gray-500 text-sm mt-1 mb-4">Instant deposits directly from your M-Pesa enabled phone.</p>
                      <Button variant="outline" onClick={() => {
                         setPaymentMode('deposit');
                         setActiveTab('payments');
@@ -417,7 +405,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                   </div>
                 </div>
 
-                {/* Recent Transactions Preview */}
+                {/* Recent Transactions */}
                 <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
                   <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center">
                     <h3 className="font-semibold text-gray-900">Recent Transactions</h3>
@@ -474,7 +462,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                     </p>
                   </div>
                   
-                  {/* Mode Toggles */}
                   <div className="flex border-b border-gray-200">
                      <button 
                         onClick={() => { setPaymentMode('deposit'); setPaymentStatus('idle'); }}
@@ -507,18 +494,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                       </div>
                     ) : (
                       <form onSubmit={handleTransactionSubmit} className="space-y-6">
-                         <div className={`border rounded-lg p-4 text-sm ${paymentMode === 'deposit' ? 'bg-yellow-50 border-yellow-100 text-yellow-800' : 'bg-blue-50 border-blue-100 text-blue-800'}`}>
-                            {paymentMode === 'deposit' 
-                              ? <span>
-                                  <strong>{isConnected ? 'Live Mode:' : 'Demo Mode:'}</strong> 
-                                  {isConnected 
-                                    ? ' Enter real M-Pesa phone number. You will receive a real STK Push on your phone.' 
-                                    : ' Backend not found. Simulating successful payment.'}
-                                </span>
-                              : <span><strong>Balance:</strong> KES {user.balance.toLocaleString()}. You cannot withdraw more than this.</span>
-                            }
-                         </div>
-
                         <Input
                           label="Phone Number"
                           placeholder="254712345678"
@@ -540,14 +515,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                         />
 
                         {paymentStatus === 'error' && (
-                          <div className="text-red-600 text-sm text-center font-medium">
+                          <div className="text-red-600 text-sm text-center font-medium bg-red-50 p-3 rounded-lg">
                             {statusMessage}
                           </div>
                         )}
                         
                         {paymentStatus === 'processing' && (
-                          <div className={`${paymentMode === 'deposit' ? 'text-mpesa-600' : 'text-gray-700'} text-sm text-center font-medium animate-pulse`}>
-                            {statusMessage}
+                          <div className="flex flex-col items-center justify-center p-4 bg-blue-50 rounded-lg text-blue-800 space-y-2">
+                             <Loader2 className="w-6 h-6 animate-spin" />
+                             <span className="text-sm font-medium text-center">{statusMessage}</span>
                           </div>
                         )}
 
@@ -556,7 +532,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                           fullWidth 
                           className={`h-12 text-lg ${paymentMode === 'withdraw' ? 'bg-gray-800 hover:bg-gray-900' : ''}`}
                           isLoading={paying}
-                          disabled={!amount || !phone}
+                          disabled={!amount || !phone || paying}
                         >
                           {paying 
                             ? 'Processing...' 
@@ -609,7 +585,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                             <td className="px-6 py-4">
                               <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
                                 txn.status === TransactionStatus.COMPLETED ? 'bg-green-100 text-green-800' :
-                                txn.status === TransactionStatus.FAILED ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'
+                                txn.status === TransactionStatus.FAILED ? 'bg-red-100 text-red-800' : 
+                                txn.status === TransactionStatus.PENDING ? 'bg-blue-100 text-blue-800' : 'bg-yellow-100 text-yellow-800'
                               }`}>
                                 {txn.status}
                               </span>
