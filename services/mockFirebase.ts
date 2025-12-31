@@ -1,296 +1,232 @@
 import { User, Transaction, TransactionType, Notification } from '../types';
+import { auth, db } from './firebase';
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut as firebaseSignOut, 
+  updateProfile,
+  onAuthStateChanged,
+  User as FirebaseUser
+} from 'firebase/auth';
+import { 
+  collection, 
+  doc, 
+  getDoc, 
+  setDoc, 
+  addDoc, 
+  query, 
+  where, 
+  getDocs, 
+  updateDoc,
+  increment,
+  writeBatch
+} from 'firebase/firestore';
 
-// =============================================================================
-// REAL FIREBASE CONFIGURATION (Uncomment and fill to go live)
-// =============================================================================
-/*
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile, signOut as firebaseSignOut } from 'firebase/auth';
-import { getFirestore, collection, addDoc, getDocs, query, where, orderBy, doc, updateDoc } from 'firebase/firestore';
-
-const firebaseConfig = {
-  // ... your config
-};
-
-// const app = initializeApp(firebaseConfig);
-// const auth = getAuth(app);
-// const db = getFirestore(app);
-*/
-
-// =============================================================================
-// FUNCTIONAL LOCAL STORAGE IMPLEMENTATION (Works immediately)
-// =============================================================================
-
-const STORAGE_KEYS = {
-  USER: 'pesaflow_current_user',
-  USERS_DB: 'pesaflow_users_db',
-  TXNS: 'pesaflow_transactions',
-  NOTIFS: 'pesaflow_notifications'
-};
-
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-const DEFAULT_USER: User = {
-  uid: 'user_default_01',
-  email: 'demo@pesaflow.com',
-  displayName: 'Alex Kamau',
-  balance: 24500,
-  photoURL: 'https://ui-avatars.com/api/?name=Alex+Kamau&background=0D8ABC&color=fff',
-};
-
-// Initialize Storage and ensure Default User exists
-const initializeStorage = () => {
-  if (!localStorage.getItem(STORAGE_KEYS.TXNS)) {
-    localStorage.setItem(STORAGE_KEYS.TXNS, JSON.stringify([]));
-  }
+// Helper to merge Auth User with Firestore Balance
+const fetchUserProfile = async (firebaseUser: FirebaseUser): Promise<User> => {
+  const userDocRef = doc(db, 'users', firebaseUser.uid);
   
-  let users = [];
   try {
-    const usersJson = localStorage.getItem(STORAGE_KEYS.USERS_DB);
-    users = usersJson ? JSON.parse(usersJson) : [];
-    if (!Array.isArray(users)) users = [];
-  } catch (e) {
-    users = [];
-  }
+    const userDocSnap = await getDoc(userDocRef);
+    
+    let balance = 0;
+    
+    if (userDocSnap.exists()) {
+      balance = userDocSnap.data().balance;
+    } else {
+      // If user exists in Auth but not DB (rare), init DB
+      try {
+        await setDoc(userDocRef, { 
+          email: firebaseUser.email, 
+          balance: 0,
+          createdAt: new Date().toISOString()
+        });
+      } catch (writeErr) {
+        console.warn("Could not create user document. Check Firestore Rules.", writeErr);
+      }
+    }
 
-  // Ensure default user is present if the list is empty or missing the demo user
-  if (!users.find((u: User) => u.email === DEFAULT_USER.email)) {
-    users.push(DEFAULT_USER);
-    localStorage.setItem(STORAGE_KEYS.USERS_DB, JSON.stringify(users));
+    return {
+      uid: firebaseUser.uid,
+      email: firebaseUser.email || '',
+      displayName: firebaseUser.displayName || 'User',
+      photoURL: firebaseUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(firebaseUser.displayName || 'User')}&background=random&color=fff`,
+      balance: balance
+    };
+  } catch (err: any) {
+    if (err.code === 'permission-denied') {
+      console.error("FIRESTORE PERMISSION DENIED: Please check your Firebase Console > Firestore Database > Rules.");
+      throw new Error("Missing or insufficient permissions. Please check Firestore Rules.");
+    }
+    throw err;
   }
 };
-
-// Run initialization
-initializeStorage();
 
 export const authService = {
   signIn: async (email: string, password: string): Promise<User> => {
-    await delay(1000); // Simulate network
-
-    /* REAL FIREBASE
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
-    // Fetch extra data from Firestore if needed
-    return { ... }; 
-    */
+    return await fetchUserProfile(userCredential.user);
+  },
 
-    if (email === 'error@test.com') throw new Error('Invalid credentials');
+  signUp: async (email: string, password: string, name: string): Promise<User> => {
+    // 1. Create Auth User
+    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
     
-    const normalizedEmail = email.toLowerCase().trim();
-    let users = JSON.parse(localStorage.getItem(STORAGE_KEYS.USERS_DB) || '[]');
-    let user = users.find((u: User) => u.email.toLowerCase() === normalizedEmail);
+    // 2. Update Display Name
+    await updateProfile(userCredential.user, { displayName: name });
     
-    // Self-healing: If somehow the demo user is missing during sign-in, recreate it
-    if (!user && normalizedEmail === DEFAULT_USER.email) {
-      user = DEFAULT_USER;
-      users.push(user);
-      localStorage.setItem(STORAGE_KEYS.USERS_DB, JSON.stringify(users));
-    }
+    // 3. Create Firestore Document for Balance
+    // REALISM: In a real app, users start with 0. 
+    const initialBalance = 0;
     
-    // Auto-Signup: If user still not found, create a new one automatically
-    // This resolves the "Account not found" error for simple prototypes
-    if (!user) {
-      const name = normalizedEmail.split('@')[0];
-      const displayName = name.charAt(0).toUpperCase() + name.slice(1);
-      
-      const newUser: User = {
-        uid: `user_${Date.now()}`,
-        email: normalizedEmail,
-        displayName: displayName,
-        balance: 0, // Start empty
-        photoURL: `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=random&color=fff`
-      };
+    try {
+      await setDoc(doc(db, 'users', userCredential.user.uid), {
+        email: email.toLowerCase(),
+        displayName: name,
+        balance: initialBalance,
+        createdAt: new Date().toISOString()
+      });
 
-      // Save to "DB"
-      users.push(newUser);
-      localStorage.setItem(STORAGE_KEYS.USERS_DB, JSON.stringify(users));
-
-      // Create welcome notification
-      const notifications = JSON.parse(localStorage.getItem(STORAGE_KEYS.NOTIFS) || '[]');
-      notifications.push({
-        id: `notif_${Date.now()}`,
-        userId: newUser.uid,
+      // 4. Create Welcome Notification
+      await addDoc(collection(db, 'notifications'), {
+        userId: userCredential.user.uid,
         title: 'Welcome to PesaFlow!',
-        message: 'Account created automatically. Start by topping up your wallet via M-Pesa.',
+        message: 'Your account has been successfully created. Use M-Pesa to top up your wallet.',
         date: new Date().toISOString(),
         read: false,
         type: 'success'
       });
-      localStorage.setItem(STORAGE_KEYS.NOTIFS, JSON.stringify(notifications));
-      
-      user = newUser;
+    } catch (err: any) {
+       console.error("Error setting up user profile in Firestore:", err);
+       if (err.code === 'permission-denied') {
+          throw new Error("Account created, but database access was denied. Please check Firestore Rules.");
+       }
     }
 
-    // Set Session
-    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
-    return user;
-  },
-
-  signUp: async (email: string, password: string, name: string): Promise<User> => {
-    await delay(1500); // Simulate network
-
-    /* REAL FIREBASE
-    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-    await updateProfile(userCredential.user, { displayName: name });
-    // Create initial wallet doc in Firestore
-    return { ... };
-    */
-
-    const normalizedEmail = email.toLowerCase().trim();
-    const users = JSON.parse(localStorage.getItem(STORAGE_KEYS.USERS_DB) || '[]');
-    const existing = users.find((u: User) => u.email.toLowerCase() === normalizedEmail);
-    
-    if (existing) {
-      // Instead of throwing error, just log them in
-      return authService.signIn(email, password);
-    }
-
-    const newUser: User = {
-      uid: `user_${Date.now()}`,
-      email: normalizedEmail,
+    return {
+      uid: userCredential.user.uid,
+      email: email,
       displayName: name,
-      balance: 1000, // Welcome bonus
-      photoURL: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random&color=fff`
+      photoURL: userCredential.user.photoURL || undefined,
+      balance: initialBalance
     };
-
-    // Save to "DB"
-    users.push(newUser);
-    localStorage.setItem(STORAGE_KEYS.USERS_DB, JSON.stringify(users));
-
-    // Create a welcome notification
-    const notifications = JSON.parse(localStorage.getItem(STORAGE_KEYS.NOTIFS) || '[]');
-    notifications.push({
-      id: `notif_${Date.now()}`,
-      userId: newUser.uid,
-      title: 'Welcome to PesaFlow!',
-      message: 'Your account has been successfully created. We have added KES 1,000 to your wallet as a welcome bonus.',
-      date: new Date().toISOString(),
-      read: false,
-      type: 'success'
-    });
-    localStorage.setItem(STORAGE_KEYS.NOTIFS, JSON.stringify(notifications));
-
-    // Set Session
-    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(newUser));
-    return newUser;
   },
   
   signOut: async (): Promise<void> => {
-    await delay(500);
-    /* await firebaseSignOut(auth); */
-    localStorage.removeItem(STORAGE_KEYS.USER);
+    await firebaseSignOut(auth);
   },
   
-  getCurrentUser: async (): Promise<User | null> => {
-    const stored = localStorage.getItem(STORAGE_KEYS.USER);
-    return stored ? JSON.parse(stored) : null;
+  // This waits for the Firebase Auth to initialize and checks session
+  getCurrentUser: (): Promise<User | null> => {
+    return new Promise((resolve) => {
+      const unsubscribe = onAuthStateChanged(auth, async (user) => {
+        unsubscribe(); // Unsubscribe immediately
+        if (user) {
+          try {
+            const profile = await fetchUserProfile(user);
+            resolve(profile);
+          } catch (err) {
+            console.error("Failed to fetch user profile", err);
+            resolve({
+                uid: user.uid,
+                email: user.email || '',
+                displayName: user.displayName || 'User',
+                balance: 0
+            });
+          }
+        } else {
+          resolve(null);
+        }
+      });
+    });
   },
 
   updateUserBalance: async (uid: string, newBalance: number): Promise<void> => {
-    // Update Session
-    const currentUser = JSON.parse(localStorage.getItem(STORAGE_KEYS.USER) || '{}');
-    if (currentUser.uid === uid) {
-      currentUser.balance = newBalance;
-      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
-    }
-
-    // Update "DB"
-    const users = JSON.parse(localStorage.getItem(STORAGE_KEYS.USERS_DB) || '[]');
-    const userIndex = users.findIndex((u: User) => u.uid === uid);
-    if (userIndex >= 0) {
-      users[userIndex].balance = newBalance;
-      localStorage.setItem(STORAGE_KEYS.USERS_DB, JSON.stringify(users));
-    }
+    const userRef = doc(db, 'users', uid);
+    await updateDoc(userRef, { balance: newBalance });
   }
 };
 
 export const dbService = {
   getTransactions: async (userId: string): Promise<Transaction[]> => {
-    await delay(800);
-    const allTxns: any[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.TXNS) || '[]');
-    return allTxns
-      .filter(t => t.userId === userId || !t.userId)
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    try {
+      const q = query(
+        collection(db, 'transactions'), 
+        where('userId', '==', userId)
+      );
+      
+      const querySnapshot = await getDocs(q);
+      const transactions = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Transaction));
+      
+      return transactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    } catch (err) {
+      console.error("Error fetching transactions:", err);
+      return [];
+    }
   },
 
   addTransaction: async (userId: string, transaction: Transaction): Promise<void> => {
-    await delay(500);
-    const allTxns = JSON.parse(localStorage.getItem(STORAGE_KEYS.TXNS) || '[]');
-    allTxns.unshift({ ...transaction, userId });
-    localStorage.setItem(STORAGE_KEYS.TXNS, JSON.stringify(allTxns));
-
-    const currentUser = await authService.getCurrentUser();
-    if (currentUser) {
-      let newBalance = currentUser.balance;
-      if (transaction.type === TransactionType.DEPOSIT) {
-        newBalance += transaction.amount;
-      } else {
-        newBalance -= transaction.amount;
-      }
-      await authService.updateUserBalance(currentUser.uid, newBalance);
-
-      // Create a notification for the transaction
-      const notifications = JSON.parse(localStorage.getItem(STORAGE_KEYS.NOTIFS) || '[]');
-      notifications.unshift({
-        id: `notif_${Date.now()}`,
-        userId: currentUser.uid,
-        title: 'Transaction Successful',
-        message: `Your ${transaction.type.toLowerCase()} of KES ${transaction.amount.toLocaleString()} was successful.`,
-        date: new Date().toISOString(),
-        read: false,
-        type: 'info'
-      });
-      localStorage.setItem(STORAGE_KEYS.NOTIFS, JSON.stringify(notifications));
+    const { id, ...data } = transaction;
+    
+    if (id && id.length > 5) {
+        await setDoc(doc(db, 'transactions', id), { ...data, userId });
+    } else {
+        await addDoc(collection(db, 'transactions'), { ...data, userId });
     }
+
+    const userRef = doc(db, 'users', userId);
+    const amountChange = transaction.type === TransactionType.DEPOSIT 
+      ? transaction.amount 
+      : -transaction.amount;
+
+    await updateDoc(userRef, {
+      balance: increment(amountChange)
+    });
+
+    await addDoc(collection(db, 'notifications'), {
+      userId: userId,
+      title: 'Transaction Successful',
+      message: `Your ${transaction.type.toLowerCase()} of KES ${transaction.amount.toLocaleString()} was successful.`,
+      date: new Date().toISOString(),
+      read: false,
+      type: 'info'
+    });
   },
 
   getNotifications: async (userId: string): Promise<Notification[]> => {
-    await delay(400);
-    let notifications = JSON.parse(localStorage.getItem(STORAGE_KEYS.NOTIFS) || '[]');
-    
-    // Seed some mock notifications if empty for demo purposes
-    if (notifications.filter((n: any) => n.userId === userId).length === 0) {
-      const mocks: Notification[] = [
-        {
-          id: 'n1',
-          userId,
-          title: 'Welcome to PesaFlow',
-          message: 'Secure your account by enabling 2FA in settings.',
-          date: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
-          read: true,
-          type: 'info'
-        },
-        {
-          id: 'n2',
-          userId,
-          title: 'System Update',
-          message: 'We have improved our M-Pesa integration speeds.',
-          date: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(),
-          read: false,
-          type: 'success'
-        }
-      ];
-      notifications = [...notifications, ...mocks];
-      localStorage.setItem(STORAGE_KEYS.NOTIFS, JSON.stringify(notifications));
+    try {
+      const q = query(
+        collection(db, 'notifications'),
+        where('userId', '==', userId)
+      );
+      const snapshot = await getDocs(q);
+      const notifications = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Notification));
+      
+      return notifications.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    } catch (err) {
+      console.error("Error fetching notifications:", err);
+      return [];
     }
-
-    return notifications
-      .filter((n: Notification) => n.userId === userId)
-      .sort((a: Notification, b: Notification) => new Date(b.date).getTime() - new Date(a.date).getTime());
   },
 
   markNotificationRead: async (userId: string, notificationId: string): Promise<void> => {
-    const notifications = JSON.parse(localStorage.getItem(STORAGE_KEYS.NOTIFS) || '[]');
-    const updated = notifications.map((n: Notification) => 
-      n.id === notificationId ? { ...n, read: true } : n
-    );
-    localStorage.setItem(STORAGE_KEYS.NOTIFS, JSON.stringify(updated));
+    const notifRef = doc(db, 'notifications', notificationId);
+    await updateDoc(notifRef, { read: true });
   },
 
   markAllNotificationsRead: async (userId: string): Promise<void> => {
-    const notifications = JSON.parse(localStorage.getItem(STORAGE_KEYS.NOTIFS) || '[]');
-    const updated = notifications.map((n: Notification) => 
-      n.userId === userId ? { ...n, read: true } : n
+    const q = query(
+      collection(db, 'notifications'),
+      where('userId', '==', userId),
+      where('read', '==', false)
     );
-    localStorage.setItem(STORAGE_KEYS.NOTIFS, JSON.stringify(updated));
+    const snapshot = await getDocs(q);
+    const batch = writeBatch(db);
+    
+    snapshot.docs.forEach((d) => {
+        batch.update(doc(db, 'notifications', d.id), { read: true });
+    });
+    
+    await batch.commit();
   }
 };

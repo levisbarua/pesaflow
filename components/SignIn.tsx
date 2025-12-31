@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Mail, Lock, CheckCircle2, ShieldCheck, ArrowRight, User as UserIcon } from 'lucide-react';
+import { Mail, Lock, CheckCircle2, ShieldCheck, ArrowRight, User as UserIcon, AlertTriangle } from 'lucide-react';
 import { Button } from './Button';
 import { Input } from './Input';
 import { authService } from '../services/mockFirebase';
@@ -12,23 +12,17 @@ interface SignInProps {
 export const SignIn: React.FC<SignInProps> = ({ onSuccess }) => {
   const [isSignUp, setIsSignUp] = useState(false);
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('demo@pesaflow.com');
-  const [password, setPassword] = useState('password123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const toggleMode = () => {
     setIsSignUp(!isSignUp);
     setError('');
-    if (isSignUp) {
-       // Switching back to sign in
-       setEmail('demo@pesaflow.com');
-       setPassword('password123');
-    } else {
-       // Switching to sign up
-       setEmail('');
-       setPassword('');
-    }
+    setEmail('');
+    setPassword('');
+    setName('');
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -54,8 +48,23 @@ export const SignIn: React.FC<SignInProps> = ({ onSuccess }) => {
       
       onSuccess(user);
     } catch (err: any) {
-      console.error(err);
-      setError(err.message || 'Authentication failed');
+      console.error("Sign In Error:", err);
+      
+      // Parse Firebase Error Codes
+      if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
+        setError('Invalid email or password. Please check your credentials.');
+      } else if (err.code === 'auth/email-already-in-use') {
+        // UX Fix: Auto-switch to Sign In if account exists
+        setError('This email is already registered. Please enter your password to sign in.');
+        setIsSignUp(false);
+        // We keep the email field populated so they don't have to retype it
+      } else if (err.code === 'auth/weak-password') {
+        setError('Password should be at least 6 characters.');
+      } else if (err.code === 'permission-denied' || err.message.includes('Missing or insufficient permissions')) {
+        setError('Database permission denied. Please check your Firestore Security Rules in the Firebase Console.');
+      } else {
+        setError(err.message || 'Authentication failed');
+      }
     } finally {
       setLoading(false);
     }
@@ -126,8 +135,8 @@ export const SignIn: React.FC<SignInProps> = ({ onSuccess }) => {
             <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 flex items-start gap-3">
               <ShieldCheck className="w-5 h-5 text-blue-600 mt-0.5 shrink-0" />
               <div className="text-sm text-blue-800">
-                <p className="font-semibold">Quick Login</p>
-                <p>We've pre-filled the demo account. Or enter any email to auto-create a new wallet.</p>
+                <p className="font-semibold">Secure Login</p>
+                <p>Please enter your email and password to access your dashboard.</p>
               </div>
             </div>
           )}
@@ -179,8 +188,9 @@ export const SignIn: React.FC<SignInProps> = ({ onSuccess }) => {
             )}
 
             {error && (
-              <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-600">
-                {error}
+              <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-600 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                <span>{error}</span>
               </div>
             )}
 

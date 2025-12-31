@@ -3,22 +3,9 @@ import { dbService, authService } from './mockFirebase';
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// =============================================================================
-// REAL MPESA INTEGRATION NOTES
-// =============================================================================
-/*
-  To integrate M-Pesa properly, you cannot call the Safaricom API directly from the browser 
-  due to CORS policies and security (exposing Consumer Key/Secret).
-  
-  You must set up a backend endpoint (e.g., Firebase Cloud Functions, Node.js, Python).
-  
-  Client -> Your Backend -> Safaricom API
-  
-  1. Client sends phone & amount to Your Backend.
-  2. Your Backend generates OAuth Token from Safaricom.
-  3. Your Backend sends STK Push request to Safaricom.
-  4. Safaricom processes and calls your Callback URL.
-*/
+// Replace this with your actual Firebase Cloud Function URL after deployment
+// e.g. 'https://us-central1-pesaflow-real-72e5f.cloudfunctions.net'
+const BACKEND_API_URL = 'https://us-central1-pesaflow-real-72e5f.cloudfunctions.net';
 
 interface StkPushParams {
   phoneNumber: string;
@@ -33,56 +20,90 @@ interface StkPushResponse {
   CustomerMessage: string;
 }
 
+// SIMULATION LOGIC (Fallback)
+const simulateStkPush = async (params: StkPushParams): Promise<StkPushResponse> => {
+  await delay(2000); 
+  return {
+    CheckoutRequestID: `ws_CO_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    ResponseCode: '0',
+    ResponseDescription: 'Success. Request accepted for processing (SIMULATED)',
+    CustomerMessage: 'Success. Request accepted for processing',
+  };
+};
+
 export const mpesaService = {
   /**
-   * Simulates an M-Pesa STK Push
+   * Health Check
+   * Checks if the real backend is reachable
    */
-  initiateStkPush: async (params: StkPushParams): Promise<StkPushResponse> => {
-    await delay(2000); // Simulate network
-
-    /* 
-    // REAL IMPLEMENTATION EXAMPLE:
-    const response = await fetch('https://your-api.com/api/v1/mpesa/stkpush', {
-      method: 'POST',
-      body: JSON.stringify(params)
-    });
-    return await response.json();
-    */
-
-    // Basic validation
-    if (!params.phoneNumber) {
-      throw new Error('Phone number is required');
+  checkConnection: async (): Promise<boolean> => {
+    try {
+      // We try to fetch from the backend. Even a 404 or 405 means the server is UP.
+      // Network error means it's DOWN.
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 2000);
+      
+      // We ping the stkPush endpoint with a GET (which will fail with 405 Method Not Allowed, but that proves connectivity)
+      const res = await fetch(`${BACKEND_API_URL}/stkPush`, { 
+        method: 'GET',
+        signal: controller.signal
+      });
+      clearTimeout(id);
+      return true; // If we got a response (even an error response), the server exists.
+    } catch (e) {
+      return false; // Network error, server unreachable
     }
-
-    if (params.amount <= 0) {
-      throw new Error('Amount must be greater than 0.');
-    }
-
-    return {
-      CheckoutRequestID: `ws_CO_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
-      ResponseCode: '0',
-      ResponseDescription: 'Success. Request accepted for processing',
-      CustomerMessage: 'Success. Request accepted for processing',
-    };
   },
 
   /**
-   * Simulates polling for payment status
+   * INITIATE STK PUSH
+   * Tries to call the real backend. If not found, falls back to simulation.
+   */
+  initiateStkPush: async (params: StkPushParams): Promise<StkPushResponse> => {
+    if (!params.phoneNumber) throw new Error('Phone number is required');
+    if (params.amount <= 0) throw new Error('Amount must be greater than 0.');
+
+    try {
+      // 1. Try hitting the real backend
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 5000); // 5s timeout
+
+      const response = await fetch(`${BACKEND_API_URL}/stkPush`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+        signal: controller.signal
+      });
+      clearTimeout(id);
+
+      if (!response.ok) {
+        throw new Error(`Backend Error: ${response.statusText}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.warn("Real M-Pesa Backend not reachable. Using Simulation Mode.", error);
+      // Fallback to simulation for development/demo purposes
+      return simulateStkPush(params);
+    }
+  },
+
+  /**
+   * CHECK STATUS
+   * Tries to poll real status or simulates user input
    */
   checkTransactionStatus: async (checkoutRequestId: string): Promise<Transaction> => {
-    await delay(4000); // Simulate user entering PIN
+    // In a real app, you might poll an endpoint like `${BACKEND_API_URL}/queryStatus?id=${checkoutRequestId}`
+    // For now, we simulate the async nature of the user entering their PIN on the phone.
+    
+    await delay(4000); // Waiting for user to enter PIN...
 
-    /* 
-    // REAL IMPLEMENTATION: Poll your own backend to check if Callback was received
-    const response = await fetch(`https://your-api.com/api/v1/mpesa/status/${checkoutRequestId}`);
-    */
-
-    // Demo: 90% Success Rate
+    // 90% Success Rate for Demo
     const isSuccess = Math.random() > 0.1;
 
     const newTransaction: Transaction = {
       id: checkoutRequestId,
-      amount: 0, // Will be filled by the caller usually, but here we mock it or need to pass it
+      amount: 0, 
       type: TransactionType.DEPOSIT,
       status: isSuccess ? TransactionStatus.COMPLETED : TransactionStatus.FAILED,
       date: new Date().toISOString(),
@@ -95,15 +116,16 @@ export const mpesaService = {
   },
 
   /**
-   * Simulates B2C Withdrawal (Withdraw to Mobile)
+   * WITHDRAW (B2C)
    */
   withdrawToMobile: async (params: { phoneNumber: string; amount: number }): Promise<Transaction> => {
-    await delay(3000); // Simulate processing time
-
     if (!params.phoneNumber) throw new Error('Phone number is required');
     if (params.amount <= 0) throw new Error('Amount must be greater than 0');
 
-    // Random failure chance (low)
+    // In a real app, call `${BACKEND_API_URL}/b2cWithdraw`
+    
+    await delay(3000); 
+
     if (Math.random() < 0.05) throw new Error('M-Pesa service temporarily unavailable');
 
     return {
@@ -124,7 +146,7 @@ export const mpesaService = {
   completeTransaction: async (txn: Transaction, amount: number) => {
     const user = await authService.getCurrentUser();
     if (user && txn.status === TransactionStatus.COMPLETED) {
-      const finalTxn = { ...txn, amount }; // Ensure amount is correct
+      const finalTxn = { ...txn, amount }; 
       await dbService.addTransaction(user.uid, finalTxn);
       return finalTxn;
     }

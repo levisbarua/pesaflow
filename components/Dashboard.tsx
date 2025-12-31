@@ -17,13 +17,18 @@ import {
   CheckCircle2,
   AlertTriangle,
   XCircle,
-  Check
+  Check,
+  ShieldCheck,
+  Server,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 import { User, Transaction, TransactionType, TransactionStatus, Notification } from '../types';
 import { dbService, authService } from '../services/mockFirebase';
 import { mpesaService } from '../services/mockMpesa';
 import { Button } from './Button';
 import { Input } from './Input';
+import { ReceiptModal } from './ReceiptModal';
 
 interface DashboardProps {
   user: User;
@@ -37,6 +42,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loadingTxns, setLoadingTxns] = useState(false);
 
+  // Connection State
+  const [isConnected, setIsConnected] = useState<boolean | null>(null);
+
   // Notification State
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -49,11 +57,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
   const [paying, setPaying] = useState(false);
   const [paymentStatus, setPaymentStatus] = useState<'idle' | 'processing' | 'success' | 'error'>('idle');
   const [statusMessage, setStatusMessage] = useState('');
+  
+  // Receipt State
+  const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
+  const [lastTransaction, setLastTransaction] = useState<Transaction | null>(null);
 
   // Initial load
   useEffect(() => {
     refreshData();
     fetchNotifications();
+    checkBackend();
 
     // Click outside handler for notifications
     const handleClickOutside = (event: MouseEvent) => {
@@ -64,6 +77,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [user.uid]);
+
+  const checkBackend = async () => {
+    const connected = await mpesaService.checkConnection();
+    setIsConnected(connected);
+  };
 
   const refreshData = async () => {
     setLoadingTxns(true);
@@ -106,10 +124,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
     e.preventDefault();
     setPaying(true);
     setPaymentStatus('processing');
+    setLastTransaction(null);
     
     try {
       const numericAmount = parseFloat(amount);
       if (isNaN(numericAmount) || numericAmount <= 0) throw new Error('Invalid amount');
+
+      let completedTxn: Transaction;
 
       if (paymentMode === 'withdraw') {
         if (numericAmount > user.balance) throw new Error('Insufficient funds');
@@ -123,6 +144,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
 
         // 2. Save to DB (dbService handles balance deduction for withdrawals)
         await dbService.addTransaction(user.uid, txn);
+        completedTxn = txn;
         setStatusMessage('Withdrawal Successful!');
 
       } else {
@@ -144,12 +166,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
         if (txn.status === TransactionStatus.COMPLETED) {
           // 3. Complete and persist to DB
           await mpesaService.completeTransaction(txn, numericAmount);
+          completedTxn = { ...txn, amount: numericAmount };
           setStatusMessage('Payment Successful!');
         } else {
           throw new Error('Transaction failed or cancelled');
         }
       }
 
+      setLastTransaction(completedTxn);
       setPaymentStatus('success');
       setAmount('');
       refreshData();
@@ -182,6 +206,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
 
   return (
     <div className="min-h-screen bg-gray-50 flex">
+      {/* Receipt Modal */}
+      <ReceiptModal 
+        transaction={selectedTransaction} 
+        onClose={() => setSelectedTransaction(null)} 
+      />
+
       {/* Mobile Sidebar Overlay */}
       {mobileMenuOpen && (
         <div className="fixed inset-0 z-40 bg-gray-800 bg-opacity-50 lg:hidden" onClick={() => setMobileMenuOpen(false)}></div>
@@ -209,8 +239,33 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
             <SidebarItem id="history" icon={History} label="Transactions" />
           </div>
 
-          <div className="p-4 border-t border-gray-100">
-            <div className="flex items-center space-x-3 px-4 py-3 mb-2">
+          <div className="p-4 border-t border-gray-100 space-y-4">
+             {/* System Status Indicator */}
+            <div className={`rounded-lg p-3 flex items-center space-x-3 text-xs border ${
+              isConnected === true ? 'bg-green-50 border-green-200 text-green-700' : 
+              isConnected === false ? 'bg-orange-50 border-orange-200 text-orange-700' : 'bg-gray-50 border-gray-200 text-gray-500'
+            }`}>
+              <div className="relative">
+                <div className={`w-2 h-2 rounded-full ${
+                  isConnected === true ? 'bg-green-500' : 
+                  isConnected === false ? 'bg-orange-500' : 'bg-gray-400'
+                }`}></div>
+                {isConnected && <div className="absolute top-0 left-0 w-2 h-2 rounded-full bg-green-500 animate-ping"></div>}
+              </div>
+              <div className="flex-1">
+                <p className="font-semibold">
+                  {isConnected === true ? 'System Online' : 
+                   isConnected === false ? 'Demo Mode' : 'Checking...'}
+                </p>
+                <p className="opacity-80">
+                  {isConnected === true ? 'Real M-Pesa Connected' : 
+                   isConnected === false ? 'Simulated Backend' : 'Connecting to Server'}
+                </p>
+              </div>
+              {isConnected === true ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
+            </div>
+
+            <div className="flex items-center space-x-3 px-2">
                <img src={user.photoURL} alt={user.displayName} className="w-8 h-8 rounded-full bg-gray-200" />
                <div className="flex-1 min-w-0">
                  <p className="text-sm font-medium text-gray-900 truncate">{user.displayName}</p>
@@ -377,7 +432,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                     {loadingTxns ? (
                        <div className="p-8 text-center text-gray-500">Loading...</div>
                     ) : transactions.slice(0, 3).map((txn) => (
-                      <div key={txn.id} className="px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors">
+                      <div 
+                        key={txn.id} 
+                        onClick={() => setSelectedTransaction(txn)}
+                        className="px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors cursor-pointer"
+                      >
                         <div className="flex items-center space-x-4">
                           <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
                             txn.type === TransactionType.DEPOSIT ? 'bg-green-100 text-green-600' : 
@@ -435,13 +494,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                     {paymentStatus === 'success' ? (
                       <div className="text-center py-8">
                         <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                          <CheckIcon className="w-8 h-8 text-green-600" />
+                          <CheckCircle2 className="w-8 h-8 text-green-600" />
                         </div>
                         <h3 className="text-xl font-bold text-gray-900 mb-2">{paymentMode === 'deposit' ? 'Payment Successful!' : 'Withdrawal Successful!'}</h3>
                         <p className="text-gray-500 mb-6">Your transaction has been processed.</p>
                         <Button onClick={() => {
                           setPaymentStatus('idle');
-                          setActiveTab('history');
+                          if (lastTransaction) setSelectedTransaction(lastTransaction);
                         }}>
                           View Receipt
                         </Button>
@@ -450,7 +509,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                       <form onSubmit={handleTransactionSubmit} className="space-y-6">
                          <div className={`border rounded-lg p-4 text-sm ${paymentMode === 'deposit' ? 'bg-yellow-50 border-yellow-100 text-yellow-800' : 'bg-blue-50 border-blue-100 text-blue-800'}`}>
                             {paymentMode === 'deposit' 
-                              ? <span><strong>Demo Mode:</strong> Enter any amount. Phone receives simulated STK.</span>
+                              ? <span>
+                                  <strong>{isConnected ? 'Live Mode:' : 'Demo Mode:'}</strong> 
+                                  {isConnected 
+                                    ? ' Enter real M-Pesa phone number. You will receive a real STK Push on your phone.' 
+                                    : ' Backend not found. Simulating successful payment.'}
+                                </span>
                               : <span><strong>Balance:</strong> KES {user.balance.toLocaleString()}. You cannot withdraw more than this.</span>
                             }
                          </div>
@@ -504,7 +568,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                   </div>
                   <div className="bg-gray-50 px-6 py-4 border-t border-gray-100 text-center">
                     <p className="text-xs text-gray-500 flex items-center justify-center">
-                      <ShieldIcon className="w-3 h-3 mr-1" /> 
+                      <ShieldCheck className="w-3 h-3 mr-1" /> 
                       Secured by PesaFlow Encryption
                     </p>
                   </div>
@@ -534,8 +598,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                         {transactions.map((txn) => (
-                          <tr key={txn.id} className="hover:bg-gray-50 transition-colors">
-                            <td className="px-6 py-4 font-mono text-xs text-gray-500">{txn.id}</td>
+                          <tr 
+                            key={txn.id} 
+                            onClick={() => setSelectedTransaction(txn)}
+                            className="hover:bg-gray-50 transition-colors cursor-pointer"
+                          >
+                            <td className="px-6 py-4 font-mono text-xs text-gray-500">{txn.id.substring(0, 16)}...</td>
                             <td className="px-6 py-4 font-medium text-gray-900">{txn.description}</td>
                             <td className="px-6 py-4">{new Date(txn.date).toLocaleDateString()} {new Date(txn.date).toLocaleTimeString()}</td>
                             <td className="px-6 py-4">
@@ -570,12 +638,3 @@ export const Dashboard: React.FC<DashboardProps> = ({ user: initialUser, onLogou
     </div>
   );
 };
-
-// Simple icons for internal usage
-const CheckIcon = (props: any) => (
-  <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-);
-
-const ShieldIcon = (props: any) => (
-  <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-);
