@@ -1,0 +1,5 @@
+{
+  "name": "PesaFlow",
+  "description": "A modern, secure payment integration portal featuring M-Pesa transactions and simulated Firebase authentication.",
+  "requestFramePermissions": []
+}
