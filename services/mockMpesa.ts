@@ -3,9 +3,10 @@ import { db } from './firebase';
 import { doc, setDoc, updateDoc, increment, collection, addDoc, runTransaction } from 'firebase/firestore';
 
 // --- CONFIGURATION ---
-// 1. DEVELOPMENT: Use "http://localhost:5000"
-// 2. PRODUCTION: Use your Vercel or Render URL
-const BACKEND_API_URL = "http://localhost:5000"; 
+// Vercel Serverless runs at /api. Local development runs on localhost:5000.
+// We use a relative path so it automatically works on the deployed domain.
+// Uses optional chaining (?.) to safeguard against undefined env in some runtimes.
+const BACKEND_API_URL = (import.meta as any).env?.PROD ? "/api" : "http://localhost:5000";
 
 interface StkPushParams {
   phoneNumber: string;
@@ -97,10 +98,11 @@ export const mpesaService = {
    * Health Check
    */
   checkConnection: async (): Promise<boolean> => {
+    // Check our serverless endpoint
     const targetUrl = `${BACKEND_API_URL}/ping`;
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 1500);
+      const timeoutId = setTimeout(() => controller.abort(), 2000);
       const response = await fetch(targetUrl, { signal: controller.signal });
       clearTimeout(timeoutId);
       return response.ok;
@@ -111,7 +113,6 @@ export const mpesaService = {
 
   /**
    * INITIATE STK PUSH (Smart)
-   * Tries Real Backend first -> Falls back to Simulation
    */
   initiateStkPush: async (params: StkPushParams): Promise<StkPushResponse> => {
     if (!params.phoneNumber) throw new Error('Phone number is required');
@@ -129,12 +130,9 @@ export const mpesaService = {
       if (response.ok) {
         return await response.json();
       } else {
-        // If backend returns a specific error, throw it
         throw new Error(`Server Error: ${response.statusText}`);
       }
     } catch (error: any) {
-      // 2. Fallback to Simulation if Network Error (Server down/blocked)
-      // We assume if fetch fails, it's a connection issue, so we simulate.
       console.warn("STK Push Network Error:", error.message);
       return await runSimulation(params);
     }
@@ -144,7 +142,7 @@ export const mpesaService = {
    * WITHDRAW
    */
   withdrawToMobile: async (params: { phoneNumber: string; amount: number; userId: string }): Promise<Transaction> => {
-      // Withdrawals are always mocked for safety in this demo
+      // Mock withdrawal
       const txnId = `WID-${Date.now()}`;
       
       const newTxn: Transaction = {
